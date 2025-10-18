@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Scourge: Shadow's Ascent</title>
+    <!-- Load Tailwind CSS for styling the UI outside the canvas -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&display=swap');
+        body {
+            background-color: #1a1a2e; /* Deep purple-black */
+            font-family: 'Cinzel', serif;
+            color: #d1d5db;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        #game-container {
+            width: 90vw;
+            max-width: 1200px;
+            box-shadow: 0 0 40px rgba(255, 0, 0, 0.3);
+            border: 2px solid #9e0000;
+            border-radius: 12px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        canvas {
+            background-color: #0d0d18;
+            display: block;
+            width: 100%;
+            touch-action: none; /* Disable default touch actions for game control */
+        }
+        .ui-panel {
+            background-color: #11111a;
+            padding: 1rem;
+            border-top: 1px solid #9e0000;
+        }
+        .dialogue-box {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 80%;
+            max-width: 600px;
+            background-color: rgba(0, 0, 0, 0.9);
+            border: 2px solid #9e0000;
+            padding: 20px;
+            z-index: 100;
+            border-radius: 8px;
+            box-shadow: 0 0 30px rgba(255, 0, 0, 0.5);
+            text-align: center;
+            line-height: 1.5;
+        }
+        .cinzel {
+            font-family: 'Cinzel', serif;
+        }
+        /* Style for the button, making it feel dark fantasy */
+        .game-button {
+            transition: all 0.2s;
+            background-image: linear-gradient(to top, #4b0000, #9e0000);
+            border: 2px solid #ff0000;
+            color: #ffffff;
+            box-shadow: 0 4px #4b0000;
+        }
+        .game-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px #4b0000;
+        }
+        .game-button:active {
+            transform: translateY(2px);
+            box-shadow: 0 0 #4b0000;
+        }
+    </style>
+    <!-- Firebase Imports for Scalability -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, collection, query, limit, getDocs, onSnapshot, orderBy, runTransaction, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // IMPORTANT: The global variables provided by the environment.
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db, auth, userId = null;
+
+        // Exposed globally for use in the game logic
+        window.initializeFirebase = async () => {
+            if (Object.keys(firebaseConfig).length === 0) {
+                console.warn("Firebase config is missing. Firestore will be inactive.");
+                return;
+            }
+
+            try {
+                // setLogLevel('Debug');
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                userId = auth.currentUser?.uid || crypto.randomUUID();
+                window.db = db; // Attach to window for game logic access
+                window.userId = userId;
+                window.appId = appId;
+
+                console.log("Firebase initialized. User ID:", userId);
+
+                // Start snapshot listener for high scores once auth is ready
+                setupChaosScoreListener(db, appId);
+
+            } catch (error) {
+                console.error("Firebase initialization failed:", error);
+            }
+        };
+
+        const setupChaosScoreListener = (db, appId) => {
+            if (!db) return;
+
+            const collectionPath = `/artifacts/${appId}/public/data/chaos_scores`;
+            const scoresRef = collection(db, collectionPath);
+            const q = query(scoresRef, orderBy("score", "desc"), limit(5));
+
+            onSnapshot(q, (snapshot) => {
+                const highScores = snapshot.docs.map(doc => ({
+                    id: doc.id,
+                    ...doc.data()
+                }));
+                // Update the UI with the fetched scores (function defined in the main script)
+                window.updateLeaderboard(highScores);
+            }, (error) => {
+                console.error("Error listening to chaos scores:", error);
+            });
+        };
+
+        // Function to save the final score (accessible from the main game loop)
+        window.saveChaosScore = async (characterName, score) => {
+            if (!db) {
+                console.warn("Firestore not available. Score not saved.");
+                return;
+            }
+            const scoreData = {
+                name: characterName,
+                score: score,
+                timestamp: serverTimestamp(),
+                userId: userId,
+            };
+
+            try {
+                const collectionPath = `/artifacts/${appId}/public/data/chaos_scores`;
+                await setDoc(doc(collection(db, collectionPath)), scoreData);
+                console.log("Chaos Score saved successfully:", score);
+            } catch (e) {
+                console.error("Error adding document: ", e);
+            }
+        };
+    </script>
+</head>
+<body>
+
+    <div id="game-container" class="cinzel">
+        <!-- Status Bar -->
+        <div id="status-bar" class="ui-panel flex justify-between text-sm font-bold text-red-400">
+            <div id="char-name-display">Name: Loading...</div>
+            <div id="level-display">Level: 0</div>
+            <div id="health-display" class="flex items-center space-x-2">
+                <span>Health: 5</span>
+            </div>
+            <!-- PAUSE BUTTON -->
+            <button id="pause-button" class="game-button p-1 px-3 text-xs rounded opacity-0 transition-opacity">PAUSE</button>
+        </div>
+
+        <!-- Game Canvas -->
+        <canvas id="gameCanvas"></canvas>
+
+        <!-- Start/Game Over/Leaderboard Screen -->
+        <div id="start-screen" class="absolute inset-0 flex flex-col items-center justify-center p-8 bg-gray-900 bg-opacity-95 z-50 transition-opacity duration-500">
+            <h1 class="text-6xl font-extrabold text-red-600 mb-6">The Scourge: Shadow's Ascent</h1>
+            <p class="text-xl text-red-200 mb-10 text-center max-w-lg">Sow chaos. Undermine the corrupt Golden Order. Let your name be the whisper of despair.</p>
+
+            <input type="text" id="character-name-input" placeholder="Enter Your Antihero Name" maxlength="20"
+                   class="bg-gray-800 text-red-100 p-3 mb-6 w-full max-w-sm rounded border-2 border-red-700 focus:border-red-500 text-center cinzel">
+
+            <button id="start-button" class="game-button p-4 rounded-lg text-2xl w-full max-w-xs transition-colors">BEGIN ASCENT</button>
+
+            <!-- Leaderboard Section -->
+            <div class="mt-10 p-4 w-full max-w-sm bg-gray-800 border-2 border-red-800 rounded-lg">
+                <h2 class="text-2xl text-red-500 mb-3 border-b border-red-700 pb-2">Chaos Leaderboard</h2>
+                <ul id="leaderboard-list" class="text-sm space-y-1">
+                    <li class="text-red-300">Loading scores...</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Dialogue Overlay (Used for Intro Narrative and Controls Confirmation) -->
+        <div id="dialogue-overlay" class="dialogue-box hidden">
+            <p id="dialogue-text" class="text-xl text-red-100 mb-4"></p>
+            <p id="dialogue-speaker" class="text-sm text-red-300"></p>
+            <button id="dialogue-continue-button" class="game-button mt-4 p-2 rounded text-lg">Continue</button>
+        </div>
+
+        <!-- Pause Menu Overlay (Used when game is paused) -->
+        <div id="pause-menu" class="dialogue-box hidden">
+            <h2 class="text-4xl font-extrabold text-red-600 mb-8">ASCENSION PAUSED</h2>
+            <div class="flex flex-col space-y-4 w-full max-w-xs mx-auto">
+                <button id="continue-button" class="game-button p-3 rounded text-xl">Continue</button>
+                <button id="show-controls-button" class="game-button p-3 rounded text-xl">Controls</button>
+                <button id="end-game-button" class="game-button p-3 rounded text-xl bg-gray-700 border-gray-600">End</button>
+            </div>
+        </div>
+
+        <!-- Mobile Controls (Hidden on desktop) -->
+        <div id="mobile-controls" class="ui-panel flex justify-around md:hidden">
+            <button id="move-left" class="game-button p-3 rounded-full text-2xl w-16">«</button>
+            <button id="jump" class="game-button p-3 rounded-full text-2xl w-16">^</button>
+            <button id="move-right" class="game-button p-3 rounded-full text-2xl w-16">»</button>
+            <button id="attack" class="game-button p-3 rounded-full text-2xl w-16 text-red-300">💥</button>
+        </div>
+    </div>
+
+    <script>
+        // --- Firebase/Firestore Integration ---
+        // Initialize Firebase on load (function defined in the module script above)
+        window.onload = () => {
+            if (typeof initializeFirebase === 'function') {
+                initializeFirebase();
+            } else {
+                console.error("Firebase module functions not loaded.");
+            }
+        };
+
+        // Function to update the Leaderboard UI
+        window.updateLeaderboard = (scores) => {
+            const list = document.getElementById('leaderboard-list');
+            list.innerHTML = '';
+            if (scores.length === 0) {
+                list.innerHTML = '<li class="text-red-400">No chaos yet sown. Be the first.</li>';
+                return;
+            }
+            scores.forEach((score, index) => {
+                const li = document.createElement('li');
+                li.className = index < 3 ? 'text-red-500 font-bold' : 'text-red-300';
+                li.textContent = `#${index + 1}: ${score.name} - ${score.score} Points`;
+                list.appendChild(li);
+            });
+        };
+
+        // --- Game Setup ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const dialogueOverlay = document.getElementById('dialogue-overlay');
+        const dialogueText = document.getElementById('dialogue-text');
+        const dialogueSpeaker = document.getElementById('dialogue-speaker');
+        const dialogueContinueButton = document.getElementById('dialogue-continue-button');
+        const startScreen = document.getElementById('start-screen');
+        const startButton = document.getElementById('start-button');
+        const nameInput = document.getElementById('character-name-input');
+        
+        // New UI Elements for Pause Menu
+        const pauseButton = document.getElementById('pause-button');
+        const pauseMenu = document.getElementById('pause-menu');
+        const continueButton = document.getElementById('continue-button');
+        const showControlsButton = document.getElementById('show-controls-button');
+        const endGameButton = document.getElementById('end-game-button');
+
+        let charName = "Shadow";
+        let gameState = {
+            running: false,
+            paused: true,
+            level: 0,
+            score: 0
+        };
+
+        let player = {};
+        let enemies = [];
+        let projectiles = [];
+        let platforms = [];
+        let currentDialogue = null;
+        let isControlsScreen = false; // Flag to manage the controls confirmation flow
+
+        // Game Configuration
+        const GRAVITY = 0.5;
+        const JUMP_VELOCITY = -10;
+        const MOVE_SPEED = 4; // Decreased from 5 to 4 for slower movement
+        const PLAYER_SIZE = 30;
+        const PROJECTILE_SPEED = 10;
+
+        // Adjust canvas size on load and resize
+        const resizeCanvas = () => {
+            canvas.width = canvas.parentElement.clientWidth;
+            // Maintain a 16:9 aspect ratio or a reasonable height
+            canvas.height = Math.min(675, canvas.width * (9 / 16));
+            if (gameState.running) draw();
+        };
+
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // --- Game Objects ---
+
+        // Player Object
+        const initializePlayer = (name) => {
+            player = {
+                name: name,
+                x: 100,
+                y: canvas.height - PLAYER_SIZE - 50,
+                width: PLAYER_SIZE,
+                height: PLAYER_SIZE,
+                velY: 0,
+                isJumping: false,
+                health: 5, // INCREASED HEALTH: 3 -> 5
+                color: '#9e0000', // Dark Antihero color
+                facing: 1, // 1 for right, -1 for left
+            };
+            document.getElementById('char-name-display').textContent = `Name: ${player.name}`;
+            updateStatusDisplay();
+        };
+
+        // Enemy Constructor
+        class Enemy {
+            constructor(x, y, width, height, health, speed, color, isBoss = false, name = "Minion") {
+                this.x = x;
+                this.y = y;
+                this.width = width;
+                this.height = height;
+                this.health = health;
+                this.speed = speed;
+                this.color = color;
+                this.isBoss = isBoss;
+                this.name = name;
+                this.direction = 1; // 1: moving right, -1: moving left
+                this.maxHealth = health;
+                this.patrolRange = isBoss ? 0 : 200; // Minions patrol
+                this.initialX = x;
+                this.bossAttackTimer = isBoss ? 120 : 0;
+            }
+
+            move() {
+                if (!this.isBoss) {
+                    this.x += this.speed * this.direction;
+                    // Simple patrol logic
+                    if (this.x > this.initialX + this.patrolRange || this.x < this.initialX - this.patrolRange) {
+                        this.direction *= -1;
+                    }
+                } else {
+                    // BOSS MOVEMENT LOGIC
+                    const minDistance = 150; // Distance the boss must maintain from the player
+                    const distanceX = player.x - this.x;
+                    
+                    if (Math.abs(distanceX) > minDistance) {
+                        // Move toward the player if outside the minimum distance
+                        if (distanceX < 0) {
+                            this.x -= this.speed * 0.5; // Approach slower
+                        } else {
+                            this.x += this.speed * 0.5; // Approach slower
+                        }
+                    }
+                }
+            }
+
+            // Boss Attack Pattern: Simple single projectile
+            bossAttack() {
+                if (this.isBoss) {
+                    this.bossAttackTimer--;
+                    if (this.bossAttackTimer <= 0) {
+                        const dir = player.x < this.x ? -1 : 1;
+                        const size = 8; // Constant projectile size
+                        projectiles.push({
+                            x: this.x + this.width / 2,
+                            y: this.y + this.height / 2,
+                            size: size,
+                            width: size,    // Added width for collision check
+                            height: size,   // Added height for collision check
+                            velX: dir * PROJECTILE_SPEED * 0.7,
+                            velY: 0,
+                            color: '#00ffff', // Boss projectile color
+                            type: 'enemy'
+                        });
+                        this.bossAttackTimer = 180; // Attack every 3 seconds
+                    }
+                }
+            }
+
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+
+                if (this.isBoss) {
+                    // Boss Health Bar
+                    const barWidth = this.width;
+                    const healthRatio = this.health / this.maxHealth;
+                    ctx.fillStyle = 'red';
+                    ctx.fillRect(this.x, this.y - 15, barWidth, 10);
+                    ctx.fillStyle = 'lime';
+                    ctx.fillRect(this.x, this.y - 15, barWidth * healthRatio, 10);
+                    ctx.fillStyle = 'white';
+                    ctx.font = '12px Cinzel';
+                    ctx.textAlign = 'center';
+                    // Boss Name is drawn slightly higher up
+                    ctx.fillText(this.name, this.x + barWidth / 2, this.y - 18);
+                } else {
+                    // Minion Name Display
+                    ctx.fillStyle = 'rgba(209, 213, 219, 0.7)'; // Faded gray for minion name
+                    ctx.font = '10px Cinzel';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(this.name, this.x + this.width / 2, this.y - 5);
+                }
+            }
+        }
+
+        // --- Dialogue and Narrative ---
+        const dialogues = {
+            1: [
+                { speaker: 'NARRATOR', text: `Level 1: The Garrison. The corrupt Golden Order holds sway from the Zenith Spire, but its influence begins here. It falls to you, ${charName}, to first break their shield.` },
+                { speaker: charName, text: 'Their shield is brittle. Their faith, a lie. Let the slaughter begin.' }
+            ],
+            2: [
+                { speaker: 'NARRATOR', text: `Level 2: The Sunken Archives. To break an empire, one must destroy its history. The Archivist is here, hiding the truths that could set the world aflame.` },
+                { speaker: charName, text: 'Knowledge is the true plague. I will be its carrier.' }
+            ],
+            3: [
+                { speaker: 'NARRATOR', text: `Level 3: The Zenith Spire. Only the Solar Pontiff remains, clinging to his false light. Your chaos is their final dawn, ${charName}.` },
+                { speaker: charName, text: 'I am the end of light, and the beginning of nothing.' }
+            ],
+            win: [
+                { speaker: 'NARRATOR', text: 'The Golden Order is shattered. The world is plunged into the beautiful, endless night of anarchy. Your chaos is complete.' }
+            ]
+        };
+        
+        // Controls display for initial confirmation
+        const controlsTextHTML = `
+            <div class="space-y-3 text-red-200">
+                <p class="text-2xl font-bold text-red-400 mb-4">CONTROLS</p>
+                <div class="flex justify-between w-64 mx-auto border-b border-red-800 pb-1">
+                    <span class="font-bold">Movement:</span> <span>A/D or \u2190 / \u2192</span>
+                </div>
+                <div class="flex justify-between w-64 mx-auto border-b border-red-800 pb-1">
+                    <span class="font-bold">Jump:</span> <span>W or Spacebar</span>
+                </div>
+                <div class="flex justify-between w-64 mx-auto">
+                    <span class="font-bold">Attack (Chaos Bolt):</span> <span>Left Mouse Button or Touch Button</span>
+                </div>
+                <p class="mt-6 text-red-300 text-lg">Confirm these steps before you begin the purge.</p>
+            </div>
+        `;
+
+        const showDialogue = (dialogueData) => {
+            currentDialogue = dialogueData.slice(); // Copy array
+            dialogueOverlay.classList.remove('hidden');
+            gameState.paused = true;
+            nextDialogue();
+        };
+        
+        const showControlsConfirmation = () => {
+            isControlsScreen = true;
+            dialogueSpeaker.textContent = 'GUIDANCE';
+            dialogueText.innerHTML = controlsTextHTML;
+            dialogueContinueButton.textContent = 'COMMENCE CHAOS';
+            dialogueContinueButton.onclick = () => {
+                dialogueOverlay.classList.add('hidden');
+                dialogueContinueButton.textContent = 'Continue'; // Reset button for next narrative
+                dialogueContinueButton.onclick = nextDialogue; // Reset handler
+                startGame();
+            };
+            dialogueOverlay.classList.remove('hidden');
+        }
+
+        const nextDialogue = () => {
+            if (currentDialogue.length > 0) {
+                const line = currentDialogue.shift();
+                dialogueSpeaker.textContent = line.speaker;
+                dialogueText.textContent = line.text.replace(/charName/g, player.name);
+            } else {
+                dialogueOverlay.classList.add('hidden');
+                currentDialogue = null;
+                
+                if (gameState.level === 1 && !isControlsScreen) {
+                    // Narrative dialogue for L1 is done. Show controls confirmation next.
+                    showControlsConfirmation();
+                } else {
+                    // If not in the initial L1 flow, simply unpause.
+                    gameState.paused = false;
+                    pauseButton.classList.remove('opacity-0');
+                }
+            }
+        };
+
+        dialogueContinueButton.addEventListener('click', nextDialogue);
+
+        // --- Game Logic: Level Definition and Management ---
+
+        const levelDesigns = [
+            // Level 0 is the placeholder for the start screen/dialogue
+            null,
+            // Level 1: The Garrison (Boss: High Inquisitor)
+            {
+                name: "The Garrison",
+                platforms: [
+                    // Ground
+                    { x: 0, y: canvas.height - 50, width: canvas.width, height: 50, color: '#2a0000' },
+                    // Elevated platform
+                    { x: 200, y: canvas.height - 150, width: 250, height: 20, color: '#4b0000' },
+                ],
+                enemies: [
+                    // Minions
+                    { x: 500, y: canvas.height - 80, width: 30, height: 30, health: 1, speed: 1, color: '#6a0000', name: "Ironclad Guard" },
+                    { x: 800, y: canvas.height - 180, width: 30, height: 30, health: 1, speed: -1, color: '#6a0000', name: "Ironclad Guard" },
+                ],
+                boss: { x: canvas.width - 150, y: canvas.height - 120, width: 70, height: 70, health: 5, speed: 1, color: '#ff0000', name: "High Inquisitor" },
+                dialogueTrigger: 1
+            },
+            // Level 2: The Sunken Archives (Boss: Archivist of Truths)
+            {
+                name: "Sunken Archives",
+                platforms: [
+                    // Ground
+                    { x: 0, y: canvas.height - 50, width: canvas.width, height: 50, color: '#002a2a' },
+                    // Pillars/Steps
+                    { x: 100, y: canvas.height - 150, width: 50, height: 100, color: '#004b4b' },
+                    { x: 300, y: canvas.height - 250, width: 50, height: 200, color: '#004b4b' },
+                    { x: 500, y: canvas.height - 150, width: 50, height: 100, color: '#004b4b' },
+                ],
+                enemies: [
+                    // Minions (Faster)
+                    { x: 600, y: canvas.height - 80, width: 30, height: 30, health: 2, speed: 2, color: '#006a6a', name: "Archival Wraith" },
+                ],
+                boss: { x: 750, y: canvas.height - 320, width: 80, height: 80, health: 8, speed: 1, color: '#00ffff', name: "Archivist of Truths" },
+                dialogueTrigger: 1
+            },
+            // Level 3: Zenith Spire (Boss: Solar Pontiff)
+            {
+                name: "Zenith Spire",
+                platforms: [
+                    // Ground
+                    { x: 0, y: canvas.height - 50, width: canvas.width, height: 50, color: '#4d4d00' },
+                    // Stairs
+                    { x: 50, y: canvas.height - 100, width: 100, height: 50, color: '#6a6a00' },
+                    { x: 200, y: canvas.height - 150, width: 100, height: 100, color: '#6a6a00' },
+                    { x: 350, y: canvas.height - 200, width: 100, height: 150, color: '#6a6a00' },
+                ],
+                enemies: [
+                    // Heavily armored minion
+                    { x: 500, y: canvas.height - 230, width: 35, height: 35, health: 3, speed: 1, color: '#9e9e00', name: "Solar Zealot" },
+                    { x: 700, y: canvas.height - 80, width: 35, height: 35, health: 3, speed: -1, color: '#9e9e00', name: "Solar Zealot" },
+                ],
+                boss: { x: canvas.width - 150, y: canvas.height - 270, width: 100, height: 100, health: 15, speed: 0.5, color: '#ffff00', name: "Solar Pontiff" },
+                dialogueTrigger: 1
+            }
+        ];
+
+        const loadLevel = (levelIndex) => {
+            if (levelIndex >= levelDesigns.length) {
+                // Game Win Condition
+                endGame(true);
+                return;
+            }
+
+            // Only reset controls flag if starting a new level beyond 1
+            if (levelIndex > gameState.level) {
+                isControlsScreen = false; 
+            }
+            
+            gameState.level = levelIndex;
+            document.getElementById('level-display').textContent = `Level: ${levelIndex}`;
+
+            const levelData = levelDesigns[levelIndex];
+            platforms = [];
+            enemies = [];
+            projectiles = [];
+            player.x = 100;
+            player.y = canvas.height - 100;
+
+            // Load Platforms
+            levelData.platforms.forEach(p => platforms.push(p));
+
+            // Load Minions
+            levelData.enemies.forEach(e => {
+                // IMPORTANT: Use e.name here to apply the specific minion name
+                enemies.push(new Enemy(e.x, e.y, e.width, e.height, e.health, e.speed, e.color, false, e.name));
+            });
+
+            // Load Boss
+            const b = levelData.boss;
+            enemies.push(new Enemy(b.x, b.y, b.width, b.height, b.health, b.speed, b.color, true, b.name));
+
+            // Trigger level dialogue
+            showDialogue(dialogues[levelIndex]);
+        };
+
+        // --- Physics and Collision ---
+
+        const applyGravity = () => {
+            player.velY += GRAVITY;
+            player.y += player.velY;
+
+            // Check collision with platforms (simplistic for this demo)
+            let onPlatform = false;
+            platforms.forEach(p => {
+                // Check if player is falling and hits the top of the platform
+                if (player.velY > 0 &&
+                    player.x < p.x + p.width &&
+                    player.x + player.width > p.x &&
+                    player.y + player.height > p.y &&
+                    player.y + player.height < p.y + p.height) {
+
+                    player.y = p.y - player.height;
+                    player.velY = 0;
+                    player.isJumping = false;
+                    onPlatform = true;
+                }
+            });
+
+            // Keep player on the ground (bottom platform) if not on a specific platform
+            const groundY = canvas.height - 50;
+            if (!onPlatform && player.y + player.height > groundY) {
+                player.y = groundY - player.height;
+                player.velY = 0;
+                player.isJumping = false;
+            }
+        };
+
+        const checkPlayerEnemyCollision = () => {
+            enemies.forEach(enemy => {
+                if (isColliding(player, enemy)) {
+                    // Simple hit, respawn and lose health
+                    player.health--;
+                    player.x = 100;
+                    player.y = canvas.height - PLAYER_SIZE - 50;
+                    updateStatusDisplay();
+                    if (player.health <= 0) {
+                        endGame(false);
+                    }
+                }
+            });
+        };
+
+        const checkProjectileCollision = () => {
+            projectiles = projectiles.filter(p => {
+                // Check bounds
+                if (p.x < 0 || p.x > canvas.width || p.y < 0 || p.y > canvas.height) {
+                    return false;
+                }
+
+                // Player Projectile vs Enemy
+                if (p.type === 'player') {
+                    for (let i = 0; i < enemies.length; i++) {
+                        if (isColliding(p, enemies[i])) {
+                            enemies[i].health--;
+                            gameState.score += 100; // Reward for hit
+                            if (enemies[i].health <= 0) {
+                                gameState.score += enemies[i].isBoss ? 5000 : 1000;
+                                enemies.splice(i, 1); // Remove the defeated enemy
+
+                                // NEW PROGRESSION LOGIC: Check if all enemies are gone
+                                if (enemies.length === 0) {
+                                    loadLevel(gameState.level + 1);
+                                }
+                            }
+                            return false; // Remove projectile
+                        }
+                    }
+                }
+
+                // Enemy Projectile vs Player
+                if (p.type === 'enemy') {
+                    if (isColliding(p, player)) {
+                        player.health--;
+                        updateStatusDisplay();
+                        if (player.health <= 0) {
+                            endGame(false);
+                        }
+                        return false; // Remove projectile
+                    }
+                }
+
+                return true; // Keep projectile
+            });
+        };
+
+        const isColliding = (obj1, obj2) => {
+            // This function now correctly uses obj1.width/height which are added to projectiles
+            return obj1.x < obj2.x + obj2.width &&
+                   obj1.x + obj1.width > obj2.x &&
+                   obj1.y < obj2.y + obj2.height &&
+                   obj1.y + obj1.height > obj2.y;
+        };
+
+        // --- Input and Actions ---
+
+        let keys = {};
+        const inputMap = {
+            'ArrowLeft': 'moveLeft', 'a': 'moveLeft',
+            'ArrowRight': 'moveRight', 'd': 'moveRight',
+            'ArrowUp': 'jump', 'w': 'jump', ' ': 'jump',
+            // 'z': 'attack', 'k': 'attack' <-- Removed per user request
+        };
+
+        document.addEventListener('keydown', (e) => {
+            if (inputMap[e.key.toLowerCase()]) {
+                keys[inputMap[e.key.toLowerCase()]] = true;
+                e.preventDefault();
+            } else if (e.key.toLowerCase() === 'p') {
+                togglePause();
+            }
+        });
+        document.addEventListener('keyup', (e) => {
+            if (inputMap[e.key.toLowerCase()]) {
+                keys[inputMap[e.key.toLowerCase()]] = false;
+            }
+        });
+        
+        // MOUSE LISTENERS for Attack
+        canvas.addEventListener('mousedown', (e) => {
+            // e.button === 0 is the left mouse button
+            if (e.button === 0) {
+                keys.attack = true;
+            }
+        });
+        canvas.addEventListener('mouseup', (e) => {
+            if (e.button === 0) {
+                keys.attack = false;
+            }
+        });
+
+        // Mobile Controls setup
+        const setupMobileControls = () => {
+            const controls = [
+                { id: 'move-left', action: 'moveLeft' },
+                { id: 'move-right', action: 'moveRight' },
+                { id: 'jump', action: 'jump' },
+                { id: 'attack', action: 'attack' }
+            ];
+
+            controls.forEach(({ id, action }) => {
+                const btn = document.getElementById(id);
+                btn.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    keys[action] = true;
+                });
+                btn.addEventListener('touchend', (e) => {
+                    e.preventDefault();
+                    keys[action] = false;
+                });
+            });
+        };
+        setupMobileControls();
+
+        const handleInput = () => {
+            if (gameState.paused) return;
+
+            if (keys.moveLeft) {
+                player.x = Math.max(0, player.x - MOVE_SPEED);
+                player.facing = -1;
+            }
+            if (keys.moveRight) {
+                player.x = Math.min(canvas.width - player.width, player.x + MOVE_SPEED);
+                player.facing = 1;
+            }
+            if (keys.jump && !player.isJumping) {
+                player.velY = JUMP_VELOCITY;
+                player.isJumping = true;
+                keys.jump = false; // Consume the jump key press
+            }
+
+            // Attack logic (only fire one per key press/mouse down)
+            if (keys.attack) {
+                if (!player.isAttacking) {
+                    fireProjectile();
+                    player.isAttacking = true;
+                }
+            } else {
+                player.isAttacking = false;
+            }
+        };
+
+        const fireProjectile = () => {
+            const size = 8; // Projectile size is 8x8
+            projectiles.push({
+                x: player.x + player.width / 2,
+                y: player.y + player.height / 2,
+                size: size,
+                width: size,    // CRITICAL FIX: Added width for collision
+                height: size,   // CRITICAL FIX: Added height for collision
+                velX: player.facing * PROJECTILE_SPEED,
+                velY: 0,
+                color: '#ff0000',
+                type: 'player'
+            });
+        };
+
+        // --- Drawing Functions ---
+
+        const drawPlayer = () => {
+            ctx.fillStyle = player.color;
+            ctx.fillRect(player.x, player.y, player.width, player.height);
+
+            // Draw antihero's 'vision' line (facing indicator)
+            ctx.beginPath();
+            ctx.strokeStyle = '#d1d5db';
+            ctx.lineWidth = 2;
+            ctx.moveTo(player.x + player.width / 2, player.y + player.height / 2);
+            ctx.lineTo(player.x + player.width / 2 + player.facing * 15, player.y + player.height / 2);
+            ctx.stroke();
+        };
+
+        const drawPlatforms = () => {
+            platforms.forEach(p => {
+                ctx.fillStyle = p.color;
+                ctx.fillRect(p.x, p.y, p.width, p.height);
+            });
+        };
+
+        const drawProjectiles = () => {
+            projectiles.forEach(p => {
+                ctx.fillStyle = p.color;
+                ctx.fillRect(p.x, p.y, p.size, p.size);
+            });
+        };
+
+        const updateStatusDisplay = () => {
+            document.getElementById('health-display').textContent = `Health: ${player.health}`;
+            document.getElementById('level-display').textContent = `Level: ${gameState.level} - Score: ${gameState.score}`;
+        };
+
+
+        const draw = () => {
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#0d0d18';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw game elements
+            drawPlatforms();
+            drawPlayer();
+            enemies.forEach(e => e.draw());
+            drawProjectiles();
+
+            // Draw Score and Status again for real-time visibility (redundant, but useful)
+            ctx.fillStyle = '#d1d5db';
+            ctx.font = '16px Cinzel';
+            ctx.fillText(`Score: ${gameState.score}`, 10, 20);
+        };
+
+        // --- Game Loop ---
+        const update = () => {
+            if (gameState.paused) return;
+
+            handleInput();
+            applyGravity();
+
+            // Update enemy positions and attacks
+            enemies.forEach(enemy => {
+                enemy.move();
+                enemy.bossAttack();
+            });
+
+            // Update projectile positions
+            projectiles.forEach(p => {
+                p.x += p.velX;
+                p.y += p.velY;
+            });
+
+            // Check collisions
+            checkPlayerEnemyCollision();
+            checkProjectileCollision();
+
+            // Win/Loss check is handled inside collision checks
+        };
+
+        let lastTime = 0;
+        const gameLoop = (timestamp) => {
+            if (!gameState.running) return;
+
+            const deltaTime = timestamp - lastTime;
+            lastTime = timestamp;
+
+            // Cap the frame rate if necessary, but requestAnimationFrame usually handles it well
+            if (!gameState.paused) {
+                update();
+            }
+            draw();
+
+            requestAnimationFrame(gameLoop);
+        };
+        
+        // --- Pause Logic ---
+        const togglePause = () => {
+            if (gameState.running && !dialogueOverlay.classList.contains('hidden')) {
+                // Prevent pausing if a narrative dialogue is already open
+                return; 
+            }
+            
+            if (gameState.running) {
+                gameState.paused = !gameState.paused;
+                if (gameState.paused) {
+                    pauseMenu.classList.remove('hidden');
+                } else {
+                    pauseMenu.classList.add('hidden');
+                }
+            }
+        };
+
+
+        // --- Game Flow Control ---
+
+        startButton.addEventListener('click', () => {
+            charName = nameInput.value.trim() || "The Nameless Scourge";
+            initializePlayer(charName);
+            startScreen.style.opacity = '0';
+            setTimeout(() => {
+                startScreen.classList.add('hidden');
+                loadLevel(1); // Start the game flow at Level 1 (which triggers dialogue first)
+            }, 500);
+        });
+
+        const startGame = () => {
+            if (!gameState.running) {
+                gameState.running = true;
+                lastTime = performance.now();
+                gameLoop(lastTime);
+            }
+            // Unpause the game and hide the controls/dialogue/pause menu
+            gameState.paused = false;
+            dialogueOverlay.classList.add('hidden');
+            pauseMenu.classList.add('hidden');
+            pauseButton.classList.remove('opacity-0');
+        };
+
+        const endGame = (win) => {
+            gameState.running = false;
+            gameState.paused = true;
+            isControlsScreen = false;
+            pauseButton.classList.add('opacity-0');
+            
+            startScreen.classList.remove('hidden');
+            startScreen.style.opacity = '1';
+
+            let endTitle = win ? "Chaos Consummated" : "The Shadow Fails";
+            let endMessage = win
+                ? `The Golden Order is broken. Your final score of ${gameState.score} has been saved to the Chaos Leaderboard.`
+                : `You were defeated by the forces of the Golden Order. Your final score was ${gameState.score}. Try again.`;
+
+            document.querySelector('#start-screen h1').textContent = endTitle;
+            document.querySelector('#start-screen p').textContent = endMessage;
+            document.querySelector('#start-button').textContent = "RESTART ASCENT";
+
+            // Save score to Firestore for persistence and scalability check
+            if (win) {
+                if (typeof window.saveChaosScore === 'function') {
+                    window.saveChaosScore(player.name, gameState.score);
+                }
+            }
+
+            // Reset game state for next attempt
+            gameState.level = 0;
+            gameState.score = 0;
+            player.health = 5; // Reset to the new maximum health
+            updateStatusDisplay();
+        };
+
+        // --- Pause Menu Button Event Listeners ---
+        pauseButton.addEventListener('click', togglePause);
+        continueButton.addEventListener('click', togglePause);
+        endGameButton.addEventListener('click', () => { endGame(false); pauseMenu.classList.add('hidden'); });
+
+        showControlsButton.addEventListener('click', () => {
+            pauseMenu.classList.add('hidden');
+            
+            // Display controls using the dialogue overlay
+            dialogueSpeaker.textContent = 'GUIDANCE';
+            dialogueText.innerHTML = controlsTextHTML;
+            dialogueContinueButton.textContent = 'BACK TO MENU';
+
+            // Custom handler to return to the pause menu
+            dialogueContinueButton.onclick = () => {
+                dialogueOverlay.classList.add('hidden');
+                pauseMenu.classList.remove('hidden'); // Return to pause menu
+                dialogueContinueButton.textContent = 'Continue'; // Reset button for narrative
+                dialogueContinueButton.onclick = nextDialogue; // Reset click handler for narrative
+            };
+            dialogueOverlay.classList.remove('hidden');
+        });
+
+
+        // Initial setup for the start screen
+        document.getElementById('level-display').textContent = `Level: 0`;
+    </script>
+</body>
+</html>
